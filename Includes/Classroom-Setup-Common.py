@@ -175,15 +175,8 @@ def generate_data():
         CASE WHEN b.connected AND t.attempt=b.n_attempts THEN 120+pmod(hash(b.customer_id),780) ELSE 0 END AS duration_sec
       FROM base b LATERAL VIEW posexplode(sequence(1, b.n_attempts)) t AS pos, attempt""")
 
-    # 業務履歴に日本語コメント（参加者がテーブル一覧で意味を掴めるように）
-    spark.sql(f"COMMENT ON TABLE {_fqs}.dim_customers IS '顧客マスタ（年齢・定期預金額・退職金運用プラン/年金受取口座の利用など。全て架空）'")
-    spark.sql(f"COMMENT ON TABLE {_fqs}.dim_campaigns IS 'キャンペーンマスタ（定期預金の販促メール）'")
-    spark.sql(f"COMMENT ON TABLE {_fqs}.campaign_email_results IS '販促メールの送信・開封・URLクリック履歴（1顧客1行）'")
-    spark.sql(f"COMMENT ON TABLE {_fqs}.outbound_call_history IS 'アウトバウンド架電の履歴（1顧客に複数回の試行あり。通話成立=connected）'")
-    spark.sql(f"COMMENT ON TABLE {_fqs}.meeting_history IS '商談の履歴（online=オンライン / branch=対面。held=実施したか）'")
-    spark.sql(f"COMMENT ON TABLE {_fqs}.contract_history IS '成約（契約）の履歴（契約高・期間・金利）'")
-
     # 生成専用の内部テーブルは片付ける（参加者一覧に出さない。4履歴は既に materialize 済み）
+    # ※ テーブル/列コメントは add_metadata() でまとめて付与する（テーブル・ビュー両方に効かせるため）
     spark.sql(f"DROP TABLE IF EXISTS {_fqs}._spine")
 
 # COMMAND ----------
@@ -220,6 +213,72 @@ def create_sales_steps_view():
     LEFT JOIN meet m ON e.customer_id=m.customer_id AND e.campaign_id=m.campaign_id
     LEFT JOIN ct   ON e.customer_id=ct.customer_id AND e.campaign_id=ct.campaign_id
     """)
+
+# COMMAND ----------
+
+# --- テーブル/ビューに日本語メタデータ（COMMENT）を付与 ------------------------------
+# 参加者は 01 でテーブルを直接探索し、Genie / Genie Code もこのコメントを文脈に使う。
+# ★ビューの列コメントは元テーブルから継承されないため、テーブルとビューの両方に付ける。
+def add_metadata():
+    def _tbl_comment(tbl, text):
+        spark.sql(f"COMMENT ON TABLE {_fqs}.{tbl} IS '{text}'")
+    def _col_comments(tbl, cols):
+        for c, t in cols.items():
+            spark.sql(f"COMMENT ON COLUMN {_fqs}.{tbl}.{c} IS '{t}'")
+
+    _tbl_comment("dim_customers", "顧客マスタ。年齢・定期預金額・退職金運用プランや年金受取口座の利用など。1顧客1行。全て架空データ")
+    _col_comments("dim_customers", {
+        "customer_id":"顧客ID（主キー）", "age":"年齢（数値）", "age_band":"年代区分（20代/30代/…/70代以上）",
+        "gender":"性別", "segment":"顧客セグメント（マス/マスリテール/準富裕層/富裕層）", "prefecture":"都道府県",
+        "term_deposit_balance":"定期預金額（円）", "total_deposit":"総預金額（円）",
+        "retirement_plan_flag":"退職金運用プランの利用有無（true/false）",
+        "pension_account_flag":"年金受取口座としてABC銀行を利用しているか（true/false）",
+        "do_not_call_flag":"電話連絡お断り（true=架電対象外）", "consent":"連絡同意の有無",
+        "registration_date":"口座開設日"})
+
+    _tbl_comment("dim_campaigns", "キャンペーンマスタ。定期預金の販促メール施策")
+    _col_comments("dim_campaigns", {
+        "campaign_id":"キャンペーンID", "campaign_name":"キャンペーン名", "product_id":"商品ID",
+        "product_name":"商品名", "channel":"配信チャネル（email）", "start_date":"開始日"})
+
+    _tbl_comment("campaign_email_results", "販促メールの送信・開封・URLクリック履歴。1顧客1行")
+    _col_comments("campaign_email_results", {
+        "email_id":"メールID", "campaign_id":"キャンペーンID", "customer_id":"顧客ID",
+        "sent_at":"メール送信日時", "opened":"開封したか", "opened_at":"開封日時",
+        "clicked":"メール内URLをクリックしたか（関心の合図）", "clicked_at":"クリック日時"})
+
+    _tbl_comment("outbound_call_history", "アウトバウンド架電の履歴。1顧客に複数回の試行がありうる。1架電1行")
+    _col_comments("outbound_call_history", {
+        "call_id":"架電ID", "customer_id":"顧客ID", "campaign_id":"キャンペーンID", "called_at":"架電日時",
+        "call_result":"架電結果（connected=通話成立 / no_answer=不在 / busy=話中）",
+        "connected":"この架電で通話がつながったか", "agent_id":"担当オペレーターID", "duration_sec":"通話秒数"})
+
+    _tbl_comment("meeting_history", "商談の履歴。1商談1行")
+    _col_comments("meeting_history", {
+        "meeting_id":"商談ID", "customer_id":"顧客ID", "campaign_id":"キャンペーンID", "meeting_at":"商談日時",
+        "meeting_mode":"商談のやり方（online=オンライン商談 / branch=対面・来店商談）",
+        "held":"商談を実際に実施したか", "meeting_result":"商談結果（成約/継続検討/不成立）"})
+
+    _tbl_comment("contract_history", "成約（契約）の履歴。1契約1行")
+    _col_comments("contract_history", {
+        "contract_id":"契約ID", "customer_id":"顧客ID", "campaign_id":"キャンペーンID（成約の帰属）",
+        "contract_date":"契約日", "principal_amount":"契約高（元本・円）", "term_months":"契約期間（月：6/12/36/60）",
+        "interest_rate":"適用金利（%）", "product_id":"商品ID"})
+
+    # ビュー本体＋ビューの全列（元テーブルから継承しないので別途付与）
+    _tbl_comment("vw_sales_steps", "見込み客が成約に至るまでの各営業ステップを顧客×キャンペーンで1行にまとめた分析ビュー（メール→架電→商談→成約を結合）")
+    _col_comments("vw_sales_steps", {
+        "customer_id":"顧客ID", "campaign_id":"キャンペーンID",
+        "clicked":"メール内URLをクリックしたか", "called":"架電したか",
+        "time_to_call_minutes":"クリックから最初の架電までの経過分。小さいほど早い対応",
+        "timely_call":"すぐ架電フラグ（クリック後120分以内に架電できたか）",
+        "contacted":"架電で通話がつながった経験があるか", "meeting_held":"商談を実施したか",
+        "meeting_mode":"商談のやり方（online=オンライン / branch=対面）",
+        "closed":"成約したか", "contract_amount":"契約高（元本合計・円）",
+        "term_months":"契約期間（月）", "interest_rate":"適用金利（%）",
+        "age":"顧客年齢", "age_band":"年代区分", "gender":"性別", "segment":"顧客セグメント",
+        "prefecture":"都道府県", "term_deposit_balance":"定期預金額（円）", "total_deposit":"総預金額（円）",
+        "retirement_plan_flag":"退職金運用プランの利用有無", "pension_account_flag":"年金受取口座の利用有無"})
 
 # COMMAND ----------
 

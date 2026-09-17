@@ -16,6 +16,10 @@ generate_data()
 # 2) 講師用の答え合わせビュー（参加者一覧には出さない。Genie が裏で使う）
 create_sales_steps_view()
 
+# 2b) テーブル/ビューに日本語メタデータ（COMMENT）を付与
+#     → 01 でのテーブル探索・Genie / Genie Code の精度を上げる
+add_metadata()
+
 # 3) 受講者向けチェック：データが入ったか
 for _t, _m in [("dim_customers",1000),("campaign_email_results",1),
                ("outbound_call_history",1),("meeting_history",1),("contract_history",1)]:
